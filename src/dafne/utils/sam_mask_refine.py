@@ -48,6 +48,87 @@ image_embedding = None
 predictor = None
 old_img = None
 
+def process_image(image, device):
+    """
+    Preprocess and resize the given image.
+
+    Parameters:
+    - image (numpy.ndarray): Input image as a NumPy array.
+    - device (torch.device): The device to move the tensor to.
+
+    Returns:
+    - img_1024_tensor (torch.Tensor): The processed image tensor.
+    - H (int): Original height of the image.
+    - W (int): Original width of the image.
+    """
+    # Determine the original height and width
+    H, W = image.shape[:2]
+
+    # Preprocess the image
+    processed_image = preprocess_image(image)
+
+    # Resize the image to 1024x1024
+    img_1024 = transform.resize(
+        processed_image, (1024, 1024), order=3, preserve_range=True, anti_aliasing=True
+    ).astype(np.uint8)
+
+    # Normalize the image to [0, 1]
+    img_1024 = (img_1024 - img_1024.min()) / np.clip(
+        img_1024.max() - img_1024.min(), a_min=1e-8, a_max=None
+    )
+
+    # Convert the image shape to (3, 1024, 1024)
+    img_1024_tensor = torch.tensor(img_1024).float().permute(2, 0, 1).unsqueeze(0).to(device)
+
+    return img_1024_tensor, H, W
+
+def preprocess_image(image):
+    """
+    Preprocess the given image to ensure it is in the correct range and format for display.
+
+    Parameters:
+    image (numpy.ndarray): Input image as a NumPy array.
+
+    Returns:
+    numpy.ndarray: Preprocessed image suitable for RGB display.
+    """
+    if image.dtype == np.uint8:
+        processed_image = image
+    elif image.dtype == np.uint16:
+        max_val = image.max()
+        processed_image = (image / max_val) * 255.0
+        processed_image = processed_image.astype(np.uint8)
+    elif image.dtype in [np.int16, np.int32]:
+        min_val = image.min()
+        max_val = image.max()
+        processed_image = ((image - min_val) / (max_val - min_val)) * 255.0
+        processed_image = processed_image.astype(np.uint8)
+    elif image.dtype in [np.float32, np.float64]:
+        if image.max() > 1.0:
+            processed_image = image / image.max()
+        else:
+            processed_image = image
+        processed_image = (processed_image * 255.0).astype(np.uint8)
+    elif image.dtype == np.bool_:
+        processed_image = image.astype(np.uint8) * 255
+    else:
+        raise ValueError(f"Unsupported image data type: {image.dtype}")
+
+    processed_image = np.clip(processed_image, 0, 255)
+
+    if processed_image.ndim == 2:
+        rgb_image = np.stack((processed_image,) * 3, axis=-1)
+    elif processed_image.ndim == 3:
+        if processed_image.shape[-1] == 3:
+            rgb_image = processed_image
+        else:
+            print(f"Multi-channel image detected with shape {processed_image.shape}. "
+                  f"Only the first 3 channels will be used for display.")
+            rgb_image = processed_image[..., :3]
+    else:
+        raise ValueError(f"Unsupported number of dimensions: {processed_image.ndim}")
+
+    return rgb_image
 
 # source: https://github.com/bowang-lab/MedSAM/blob/main/MedSAM_Inference.py
 @torch.no_grad()
@@ -237,87 +318,18 @@ def enhance_mask(img, mask, progress_callback: Optional[Callable[[int, int], Non
         predictor = None
 
     bbox = enlarge_bounding_box(mask, GlobalConfig['SAM_BBOX_EXPAND_FACTOR'])
-
-    if model_choice in ['Med Sam']:
-        H, W = img.shape[:2]
+    H, W = img.shape[:2]
+    if image_embedding is None:
+        img_1024_tensor, H, W = process_image(img, device)
+        with torch.no_grad():
+            image_embedding = sam.image_encoder(img_1024_tensor)  # (1, 256, 64, 64)
         if image_embedding is None:
-            img_3c = np.repeat(img_norm[:, :, None], 3, axis=-1) if len(img_norm.shape) == 2 else img_norm
-            img_1024 = transform.resize(img_3c, (1024, 1024), order=3, preserve_range=True, anti_aliasing=True).astype(np.uint8)
-            img_1024 = (img_1024 - img_1024.min()) / np.clip(
-                img_1024.max() - img_1024.min(), a_min=1e-8, a_max=None
-            )  # normalize to [0, 1], (H, W, 3)
-            img_1024_tensor = torch.tensor(img_1024).float().permute(2, 0, 1).unsqueeze(0).to(device)
+            raise ValueError("Image embedding is not set. Check the condition that assigns image_embedding.")
 
-            with torch.no_grad():
-                image_embedding = sam.image_encoder(img_1024_tensor)  # (1, 256, 64, 64)
-            if image_embedding is None:
-                raise ValueError("Image embedding is not set. Check the condition that assigns image_embedding.")
-
-        show_progress(80, 100)
-        box_1024 = bbox / np.array([W, H, W, H]) * 1024
-        box_1024 = box_1024[None, :]  # Ensure shape is (1, 4)
-        box_1024 = box_1024[:, None, :]  # Ensure shape is (1, 1, 4)
-        masks = medsam_inference(sam, image_embedding, box_1024, H, W)
-        torch.cuda.empty_cache()
-        return masks
-    else:
-        if predictor is None:
-            predictor = SamPredictor(sam)
-            predictor.set_image(np.stack([img_norm, img_norm, img_norm], 2).astype(np.uint8))
-
-        show_progress(80, 100)
-        
-
-        point_list = generate_points_from_mask(mask)
-
-        # generate negative points
-        negative_mask = np.logical_not(mask)
-        bbox_region = np.zeros_like(mask)
-        bbox_region[bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1
-        negative_mask = np.logical_and(negative_mask, bbox_region)
-
-        negative_point_list = generate_points_from_mask(negative_mask)
-    
-
-        t = time.perf_counter()
-
-        labels = np.array([1] * point_list.shape[0] + [0] * negative_point_list.shape[0])
-
-        if point_list.ndim < 2 and negative_point_list.ndim < 2:
-            # there is no point defined. This shouldn't happen, but then return the original mask
-            print('Error detecting points')
-            return mask
-        if point_list.ndim < 2:
-            # there is no positive point in the image
-            point_list = negative_point_list
-        elif negative_point_list.ndim == 2:
-            # there are both positive and negative points
-            point_list = np.concatenate([point_list, negative_point_list], axis=0)
-        
-        # otherwise, we just stay with the positive points. The labels should be fine, because the shape is correct
-        masks, scores, logits = predictor.predict(
-            point_coords=point_list,
-            point_labels=labels,
-            box=bbox[None, :],
-            multimask_output=True
-        )
-
-        elapsed_time = time.perf_counter() - t
-        # print('Prediction time', elapsed_time*1000)
-
-        max_dice = 0
-        best_mask = 0
-
-        show_progress(100, 100)
-
-        # get the mask closest to the first
-        n_output_masks = masks.shape[0]
-        for m_id in range(n_output_masks):
-            dice = dice_score(masks[m_id, :, :], mask)
-            # print('Dice of mask', m_id, dice)
-            if dice > max_dice:
-                max_dice = dice
-                best_mask = m_id
-
-        torch.cuda.empty_cache()
-        return masks[best_mask, :, :]
+    show_progress(80, 100)
+    box_1024 = bbox / np.array([W, H, W, H]) * 1024
+    box_1024 = box_1024[None, :]  # Ensure shape is (1, 4)
+    box_1024 = box_1024[:, None, :]  # Ensure shape is (1, 1, 4)
+    masks = medsam_inference(sam, image_embedding, box_1024, H, W)
+    torch.cuda.empty_cache()
+    return masks
