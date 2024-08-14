@@ -36,6 +36,7 @@ elif GlobalConfig['USE_GPU_FOR'] == 'Both (careful!)':
             print(e)
 
 import matplotlib
+from matplotlib.widgets import RectangleSelector
 from dafne_dl.common.biascorrection import biascorrection_image
 from matplotlib.patches import Rectangle
 from voxel import NiftiWriter
@@ -246,6 +247,79 @@ class MuscleSegmentation(ImageShow, QObject):
             if 'keymap' in key and 'zoom' not in key and 'pan' not in key:
                 plt.rcParams[key] = []
         sys.excepthook = make_excepthook(self)
+
+        self.toolbox_window.box_prompt_activated.connect(self.activate_box_prompt)
+        self.toolbox_window.box_prompt_deactivated.connect(self.deactivate_box_prompt)
+
+    def activate_box_prompt(self):
+        self.box_prompt_active = True
+        self.rect_selector = RectangleSelector(
+            self.axes,
+            self.on_box_select,
+            drawtype='box',
+            useblit=True,
+            button=[1],
+            minspanx=5,
+            minspany=5,
+            spancoords='pixels',
+            interactive=True
+        )
+        self.rect_selector.set_active(True)
+        self.key_press_cid = self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
+
+    def deactivate_box_prompt(self):
+        self.box_prompt_active = False
+        if self.rect_selector:
+            self.rect_selector.set_active(False)
+            self.rect_selector = None
+        if hasattr(self, 'current_box'):
+            delattr(self, 'current_box')
+        self.fig.canvas.mpl_disconnect(self.key_press_cid)
+        self.redraw()
+
+    def on_box_select(self, eclick, erelease):
+        if self.box_prompt_active:
+            self.current_box = (eclick.xdata, eclick.ydata, erelease.xdata, erelease.ydata)
+
+    def on_key_press(self, event):
+        if event.key == 'enter' and self.box_prompt_active and hasattr(self, 'current_box'):
+            x1, y1, x2, y2 = self.current_box
+            self.create_roi_from_box(x1, y1, x2, y2)
+            self.current_box = None
+            self.deactivate_box_prompt()
+
+    def create_roi_from_box(self, x1, y1, x2, y2):
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        
+        mask = np.zeros_like(self.image, dtype=bool)
+        mask[int(y_min):int(y_max), int(x_min):int(x_max)] = True
+        
+        # Get the current ROI name
+        current_roi_name = self.getCurrentROIName()
+        if not current_roi_name:
+            # If no ROI is selected, create a new one
+            new_roi_name = self.get_unique_roi_name("Box_ROI")
+            self.roiManager.add_roi(new_roi_name, int(self.curImage))
+            current_roi_name = new_roi_name
+        
+        # Add the mask to the current ROI
+        self.roiManager.set_mask(current_roi_name, int(self.curImage), mask)
+        
+        # Update the toolbox
+        self.updateRoiList()
+        self.toolbox_window.set_current_roi(current_roi_name)
+        
+        # Redraw the image
+        self.alert(f"Box ROI {current_roi_name} created", "info")
+        self.redraw()
+        self.deactivate_box_prompt()
+
+    def get_unique_roi_name(self, base_name):
+        i = 1
+        while self.roiManager.contains(f"{base_name}_{i}"):
+            i += 1
+        return f"{base_name}_{i}"
 
     @pyqtSlot(list, str)
     def show_news(self, news, index_address):
@@ -2138,6 +2212,8 @@ class MuscleSegmentation(ImageShow, QObject):
     def leftPressCB(self, event):
         if not self.imPlot.contains(event):
             return
+        if self.box_prompt_active:
+            return  # Let the RectangleSelector handle the event
 
         # These two are independent on the existance of an active ROI
         if self.toolbox_window.get_subregion_restriction():

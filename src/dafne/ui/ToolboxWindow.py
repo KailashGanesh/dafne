@@ -217,6 +217,9 @@ class ToolboxWindow(QMainWindow, Ui_SegmentationToolbox):
 
     show_3D_viewer_signal = pyqtSignal()
 
+    box_prompt_activated = pyqtSignal()
+    box_prompt_deactivated = pyqtSignal()
+
     NO_STATE = 0
     ADD_STATE = 1
     REMOVE_STATE = 2
@@ -224,6 +227,7 @@ class ToolboxWindow(QMainWindow, Ui_SegmentationToolbox):
     TRANSLATE_STATE = 4
     SUBREGION_SET_STATE = 5
     SUBREGION_MOVE_STATE = 6
+    BOX_PROMPT_STATE = 7
 
     BRUSH_CIRCLE = 'Circle'
     BRUSH_SQUARE = 'Square'
@@ -239,6 +243,7 @@ class ToolboxWindow(QMainWindow, Ui_SegmentationToolbox):
         self.state_buttons_dict = {
             self.addpaint_button: self.ADD_STATE,
             self.removeerase_button: self.REMOVE_STATE,
+            self.boxprompt_button: self.BOX_PROMPT_STATE,
             self.translateContour_button: self.TRANSLATE_STATE,
             self.rotateContour_button: self.ROTATE_STATE,
             self.segment_area_set_button: self.SUBREGION_SET_STATE,
@@ -293,6 +298,8 @@ class ToolboxWindow(QMainWindow, Ui_SegmentationToolbox):
 
         self.addpaint_button.clicked.connect(self.manage_edit_toggle)
         self.removeerase_button.clicked.connect(self.manage_edit_toggle)
+        self.boxprompt_button.clicked.connect(self.manage_edit_toggle)
+        self.boxprompt_button.clicked.connect(self.on_boxprompt_button_clicked)
         self.translateContour_button.clicked.connect(self.manage_edit_toggle)
         self.rotateContour_button.clicked.connect(self.manage_edit_toggle)
         self.segment_area_set_button.clicked.connect(self.manage_edit_toggle)
@@ -464,6 +471,13 @@ class ToolboxWindow(QMainWindow, Ui_SegmentationToolbox):
     def is_3D_viewer_visible(self):
         if self.viewer3D is None: return False
         return self.viewer3D.isVisible()
+    
+    @pyqtSlot()
+    def on_boxprompt_button_clicked(self):
+        if self.boxprompt_button.isChecked():
+            self.box_prompt_activated.emit()
+        else:
+            self.box_prompt_deactivated.emit()
 
     @pyqtSlot()
     @ask_confirm("Are you sure you want to reset all autosegment subregions?")
